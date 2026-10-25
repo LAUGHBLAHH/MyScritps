@@ -1,0 +1,340 @@
+--[[
+	UILib - 轻量级 Roblox UI 库 (Luau)
+
+	用法：
+		1. 在 ReplicatedStorage 里新建 ModuleScript，命名为 UILib，粘贴本文件内容
+		2. 在 StarterPlayerScripts 里新建 LocalScript，参考 Example.client.lua
+
+	API 概览：
+		local Window = UILib:CreateWindow({ Title, Size(Vector2), Theme, ToggleKey, Parent, OnClose, MobileButton })
+		local Tab    = Window:CreateTab("名称")
+		local Sec    = Tab:AddSection("分组")          -- 可选，Section 与 Tab 拥有相同的 Add* 方法
+
+		Tab:AddLabel(text)
+		Tab:AddDivider()
+		Tab:AddButton({ Name, Callback })
+		Tab:AddToggle({ Name, Default, Flag, Callback })
+		Tab:AddSlider({ Name, Min, Max, Default, Increment, Suffix, Flag, Callback })
+		Tab:AddDropdown({ Name, Options, Default, Multi, Flag, Callback })
+		Tab:AddInput({ Name, Default, Placeholder, Numeric, ClearOnFocus, Flag, Callback })
+		Tab:AddKeybind({ Name, Default(Enum.KeyCode), Flag, Callback(按下时), ChangedCallback(改键时) })
+
+		每个元素都有 :Get() / :Set(value, silent) / :Destroy()（Button/Label 另有 :SetText）
+		初始 Default 不会触发 Callback；之后用户操作或 :Set() 才会触发（silent=true 则不触发）
+
+		Window:Notify({ Title, Content, Duration, Type = "Info"|"Success"|"Warning"|"Error" })
+		Window:SetTheme("Dark"|"Light"|"Ocean"|自定义表)
+		Window:SetVisible(bool) / Window:Toggle() / Window:SetMinimized(bool)
+		Window:SetToggleKey(Enum.KeyCode)
+		Window:GetConfig() / Window:LoadConfig(table)   -- 取得/还原所有带 Flag 的元素值
+		Window:Destroy()
+		Window.Flags[flag]                               -- 实时读取元素当前值
+]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local UILib = {}
+UILib.Version = "1.0.0"
+
+--------------------------------------------------------------------------
+-- 主题
+--------------------------------------------------------------------------
+UILib.Themes = {
+	Dark = {
+		Background = Color3.fromRGB(24, 24, 28),
+		Topbar = Color3.fromRGB(32, 32, 38),
+		Sidebar = Color3.fromRGB(28, 28, 33),
+		Element = Color3.fromRGB(40, 40, 48),
+		ElementHover = Color3.fromRGB(50, 50, 60),
+		Accent = Color3.fromRGB(88, 101, 242),
+		Text = Color3.fromRGB(235, 235, 240),
+		SubText = Color3.fromRGB(150, 150, 165),
+		Stroke = Color3.fromRGB(60, 60, 72),
+		Success = Color3.fromRGB(67, 181, 129),
+		Warning = Color3.fromRGB(250, 166, 26),
+		Error = Color3.fromRGB(240, 71, 71),
+	},
+	Light = {
+		Background = Color3.fromRGB(245, 245, 248),
+		Topbar = Color3.fromRGB(235, 235, 240),
+		Sidebar = Color3.fromRGB(228, 228, 235),
+		Element = Color3.fromRGB(255, 255, 255),
+		ElementHover = Color3.fromRGB(238, 238, 245),
+		Accent = Color3.fromRGB(88, 101, 242),
+		Text = Color3.fromRGB(30, 30, 36),
+		SubText = Color3.fromRGB(110, 110, 125),
+		Stroke = Color3.fromRGB(205, 205, 218),
+		Success = Color3.fromRGB(46, 160, 100),
+		Warning = Color3.fromRGB(230, 145, 10),
+		Error = Color3.fromRGB(220, 50, 50),
+	},
+	Ocean = {
+		Background = Color3.fromRGB(13, 27, 42),
+		Topbar = Color3.fromRGB(19, 38, 58),
+		Sidebar = Color3.fromRGB(16, 33, 50),
+		Element = Color3.fromRGB(24, 46, 70),
+		ElementHover = Color3.fromRGB(32, 60, 90),
+		Accent = Color3.fromRGB(0, 170, 255),
+		Text = Color3.fromRGB(230, 240, 250),
+		SubText = Color3.fromRGB(140, 165, 190),
+		Stroke = Color3.fromRGB(45, 78, 110),
+		Success = Color3.fromRGB(67, 200, 140),
+		Warning = Color3.fromRGB(250, 176, 46),
+		Error = Color3.fromRGB(240, 80, 80),
+	},
+}
+
+--------------------------------------------------------------------------
+-- 工具函数
+--------------------------------------------------------------------------
+local TOPBAR_HEIGHT = 36
+local FAST = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local MEDIUM = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+local function tween(inst, props, info)
+	TweenService:Create(inst, info or FAST, props):Play()
+end
+
+local function create(className, props, children)
+	local inst = Instance.new(className)
+	local parent
+	for key, value in pairs(props or {}) do
+		if key == "Parent" then
+			parent = value
+		else
+			inst[key] = value
+		end
+	end
+	for _, child in ipairs(children or {}) do
+		child.Parent = inst
+	end
+	inst.Parent = parent
+	return inst
+end
+
+local function addCorner(parent, radius)
+	return create("UICorner", { CornerRadius = UDim.new(0, radius), Parent = parent })
+end
+
+local function isPointer(input)
+	local t = input.UserInputType
+	return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+local function isMove(input)
+	local t = input.UserInputType
+	return t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch
+end
+
+local function makeDraggable(handle, target, connections)
+	local dragging = false
+	local dragStart, startPos
+
+	handle.InputBegan:Connect(function(input)
+		if not isPointer(input) then
+			return
+		end
+		dragging = true
+		dragStart = input.Position
+		startPos = target.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				dragging = false
+			end
+		end)
+	end)
+
+	table.insert(
+		connections,
+		UserInputService.InputChanged:Connect(function(input)
+			if dragging and isMove(input) then
+				local delta = input.Position - dragStart
+				target.Position = UDim2.new(
+					startPos.X.Scale,
+					startPos.X.Offset + delta.X,
+					startPos.Y.Scale,
+					startPos.Y.Offset + delta.Y
+				)
+			end
+		end)
+	)
+end
+
+--------------------------------------------------------------------------
+-- 类定义
+--------------------------------------------------------------------------
+local Window = {}
+Window.__index = Window
+
+local Container = {}
+Container.__index = Container
+
+local Tab = setmetatable({}, { __index = Container })
+Tab.__index = Tab
+
+local Section = setmetatable({}, { __index = Container })
+Section.__index = Section
+
+--------------------------------------------------------------------------
+-- Window 内部方法
+--------------------------------------------------------------------------
+
+-- 把实例属性绑定到主题色，SetTheme 时会自动更新
+function Window:_bind(inst, prop, key, animate)
+	local entry = self._themed[inst]
+	if not entry then
+		entry = {}
+		self._themed[inst] = entry
+	end
+	entry[prop] = key
+	if animate then
+		tween(inst, { [prop] = self.Theme[key] }, FAST)
+	else
+		inst[prop] = self.Theme[key]
+	end
+end
+
+function Window:_text(parent, props, colorKey)
+	local label = create("TextLabel", {
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Font = Enum.Font.Gotham,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	for key, value in pairs(props) do
+		label[key] = value
+	end
+	label.Parent = parent
+	self:_bind(label, "TextColor3", colorKey or "Text")
+	return label
+end
+
+function Window:_emit(flag, value, callback, silent)
+	if flag then
+		self.Flags[flag] = value
+	end
+	if callback and not silent then
+		task.spawn(callback, value)
+	end
+end
+
+function Window:_register(flag, element, frame, value)
+	element.Frame = frame
+	element.Flag = flag
+	if flag then
+		self.Elements[flag] = element
+		self.Flags[flag] = value
+	end
+	element.Destroy = function()
+		if flag and self.Elements[flag] == element then
+			self.Elements[flag] = nil
+			self.Flags[flag] = nil
+		end
+		frame:Destroy()
+	end
+	return element
+end
+
+local function hover(win, frame, button)
+	button.MouseEnter:Connect(function()
+		win:_bind(frame, "BackgroundColor3", "ElementHover", true)
+	end)
+	button.MouseLeave:Connect(function()
+		win:_bind(frame, "BackgroundColor3", "Element", true)
+	end)
+end
+
+--------------------------------------------------------------------------
+-- 创建窗口
+--------------------------------------------------------------------------
+function UILib:CreateWindow(options)
+	options = options or {}
+	local self = setmetatable({}, Window)
+
+	self.Title = options.Title or "UILib"
+	self.Theme = table.clone(UILib.Themes.Dark)
+	local themeOption = options.Theme
+	if type(themeOption) == "string" then
+		themeOption = UILib.Themes[themeOption]
+	end
+	if type(themeOption) == "table" then
+		for key, value in pairs(themeOption) do
+			self.Theme[key] = value
+		end
+	end
+
+	self.Flags = {}
+	self.Elements = {}
+	self.Tabs = {}
+	self.CurrentTab = nil
+	self.ToggleKey = options.ToggleKey or Enum.KeyCode.RightShift
+	self.Visible = true
+	self._themed = setmetatable({}, { __mode = "k" })
+	self._connections = {}
+	self._minimized = false
+	self._notifOrder = 0
+
+	local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	local size = options.Size or (touchOnly and Vector2.new(460, 290) or Vector2.new(580, 380))
+	local sidebarWidth = touchOnly and 112 or 140
+	self._size = size
+
+	-- ScreenGui
+	local parent = options.Parent or Players.LocalPlayer:WaitForChild("PlayerGui")
+	self.Gui = create("ScreenGui", {
+		Name = "UILib_" .. self.Title,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 100,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Parent = parent,
+	})
+
+	-- 主窗口
+	local main = create("Frame", {
+		Name = "Main",
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		Size = UDim2.fromOffset(size.X, size.Y),
+		Position = UDim2.new(0.5, -size.X / 2, 0.5, -size.Y / 2),
+		Parent = self.Gui,
+	})
+	self.Main = main
+	self:_bind(main, "BackgroundColor3", "Background")
+	addCorner(main, 8)
+	local mainStroke = create("UIStroke", { Thickness = 1, Parent = main })
+	self:_bind(mainStroke, "Color", "Stroke")
+
+	-- 顶栏
+	local topbar = create("Frame", {
+		Name = "Topbar",
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, TOPBAR_HEIGHT),
+		Parent = main,
+	})
+	self:_bind(topbar, "BackgroundColor3", "Topbar")
+	addCorner(topbar, 8)
+
+	self._topFill = create("Frame", {
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 8),
+		Position = UDim2.new(0, 0, 1, -8),
+		Parent = topbar,
+	})
+	self:_bind(self._topFill, "BackgroundColor3", "Topbar")
+
+	self.TitleLabel = self:_text(topbar, {
+		Size = UDim2.new(1, -90, 1, 0),
+		Position = UDim2.fromOffset(14, 0),
+		Text = self.Title,
+		Font = Enum.Font.GothamBold,
+	})
+
+	local function topButton(text, offsetX, textSize)
+		local button = create("TextButton", {
+			Size = UDim2.fromOffset(28, 28),
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1,
