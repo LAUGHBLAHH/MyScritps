@@ -1,0 +1,500 @@
+-- UI extracted and adapted from EdgeIY/infiniteyield (MIT).
+-- Source: https://github.com/EdgeIY/infiniteyield/blob/master/source
+-- Copyright (c) 2026 EdgeIY. Full upstream license: LICENSE.
+-- Client-side only. No original commands, hooks, plugins or file operations.
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local Library = {}
+local Window = {}
+Window.__index = Window
+local Page = {}
+Page.__index = Page
+
+Library.Theme = {
+	Shade1 = Color3.fromRGB(36, 36, 37),
+	Shade2 = Color3.fromRGB(46, 46, 47),
+	Shade3 = Color3.fromRGB(78, 78, 79),
+	Text1 = Color3.new(1, 1, 1),
+	Text2 = Color3.new(0, 0, 0),
+	Scroll = Color3.fromRGB(78, 78, 79),
+}
+
+local function new(class, props, parent)
+	local object = Instance.new(class)
+	for key, value in pairs(props) do object[key] = value end
+	object.Parent = parent
+	return object
+end
+
+local function callback(fn, ...)
+	if not fn then return end
+	local args = table.pack(...)
+	task.spawn(function()
+		local ok, err = pcall(fn, table.unpack(args, 1, args.n))
+		if not ok then warn("[InfiniteYieldUI] " .. tostring(err)) end
+	end)
+end
+
+local function finite(n)
+	return type(n) == "number" and n == n and math.abs(n) < math.huge
+end
+
+function Window:_connect(signal, fn, owner)
+	local connection = signal:Connect(fn)
+	table.insert(owner or self._connections, connection)
+	return connection
+end
+
+local function disconnectAll(connections)
+	for _, connection in ipairs(connections) do connection:Disconnect() end
+	table.clear(connections)
+end
+
+function Window:_bind(object, property, slot)
+	object[property] = self.Theme[slot]
+	self._colors[object] = self._colors[object] or {}
+	self._colors[object][property] = slot
+	return object
+end
+
+function Window:_frame(parent, name, size, position, slot)
+	local frame = new("Frame", {
+		Name = name, BorderSizePixel = 0, Size = size,
+		Position = position or UDim2.new(),
+	}, parent)
+	return self:_bind(frame, "BackgroundColor3", slot or "Shade1")
+end
+
+function Window:_text(class, parent, text, size, position, background)
+	local item = new(class, {
+		BorderSizePixel = 0, BackgroundTransparency = background and 0 or 1,
+		Size = size, Position = position or UDim2.new(),
+		Font = Enum.Font.SourceSans, TextSize = 14, Text = text or "",
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, parent)
+	self:_bind(item, "TextColor3", "Text1")
+	if background then self:_bind(item, "BackgroundColor3", background) end
+	if class == "TextBox" then
+		item.ClearTextOnFocus = false
+		self:_bind(item, "PlaceholderColor3", "Scroll")
+	end
+	return item
+end
+
+function Window:SetTheme(theme)
+	assert(not self._destroyed, "Window is destroyed")
+	for slot, color in pairs(theme) do
+		assert(self.Theme[slot] and typeof(color) == "Color3", "Invalid theme slot: " .. tostring(slot))
+	end
+	for slot, color in pairs(theme) do self.Theme[slot] = color end
+	for object, bindings in pairs(self._colors) do
+		for property, slot in pairs(bindings) do object[property] = self.Theme[slot] end
+	end
+end
+
+function Window:SetScale(scale)
+	assert(finite(scale) and scale >= 0.5 and scale <= 2, "Scale must be between 0.5 and 2")
+	self.Scale.Scale = scale
+	self.Root.Size = UDim2.fromScale(1 / scale, 1 / scale)
+end
+
+function Window:_animate(position)
+	if self._movement then self._movement:Cancel() end
+	self._movement = TweenService:Create(self.Holder,
+		TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.InOut), { Position = position })
+	self._movement:Play()
+end
+
+function Window:SetMinimized(value)
+	if self._destroyed then return end
+	self._minimized = value == true
+	self.Tooltip.Visible = false
+	local pos = self._openPosition
+	local offset = self._minimized and (self._height - 20) or 0
+	self:_animate(UDim2.new(pos.X.Scale, pos.X.Offset, pos.Y.Scale, pos.Y.Offset + offset))
+end
+
+function Window:SetVisible(value)
+	if self._destroyed then return end
+	self.Root.Visible = value == true
+	if not value then
+		self.Cmdbar:ReleaseFocus()
+		self.Tooltip.Visible = false
+	end
+end
+
+function Window:SetPrefix(prefix)
+	assert(type(prefix) == "string" and #prefix > 0, "Prefix must not be empty")
+	self.Prefix = prefix
+end
+
+function Window:_filter()
+	local query = string.lower(self.Cmdbar.Text)
+	for _, entry in ipairs(self._commands) do
+		entry.Instance.Visible = query == "" or string.find(entry._search, query, 1, true) ~= nil
+	end
+	self.Tooltip.Visible = false
+end
+
+function Window:_tooltip(entry, visible)
+	self.Tooltip.Visible = visible and entry.Description ~= ""
+	self._tooltipTitle.Text = entry.Text
+	self._tooltipDescription.Text = entry.Description
+end
+
+function Window:_drag(handle)
+	self:_connect(handle.InputBegan, function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1
+			and input.UserInputType ~= Enum.UserInputType.Touch then return end
+		self._dragInput = input
+		self._dragStart = input.Position
+		self._dragPosition = self.Holder.Position
+	end)
+	self:_connect(UIS.InputChanged, function(input)
+		if not self._dragInput then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input ~= self._dragInput then return end
+		if self._movement then self._movement:Cancel() end
+		local delta = (input.Position - self._dragStart) / self.Scale.Scale
+		local pos = self._dragPosition
+		self.Holder.Position = UDim2.new(pos.X.Scale, pos.X.Offset + delta.X, pos.Y.Scale, pos.Y.Offset + delta.Y)
+		local current = self.Holder.Position
+		self._openPosition = UDim2.new(current.X.Scale, current.X.Offset, current.Y.Scale,
+			current.Y.Offset - (self._minimized and (self._height - 20) or 0))
+	end)
+	self:_connect(UIS.InputEnded, function(input)
+		if input == self._dragInput then self._dragInput = nil end
+	end)
+end
+
+function Window:AddCommand(options)
+	assert(type(options.Name) == "string" and options.Name ~= "", "Command Name is required")
+	local entry = {
+		Name = options.Name, Text = options.Text or options.Name,
+		Description = options.Description or "", Aliases = options.Aliases or {},
+		Callback = options.Callback, _connections = {},
+	}
+	local aliases = table.concat(entry.Aliases, " ")
+	entry._search = string.lower(entry.Name .. " " .. entry.Text .. " " .. aliases .. " " .. entry.Description)
+	local row = self:_text("TextButton", self.Commands, entry.Text, UDim2.new(1, -8, 0, 20))
+	row.Name = entry.Name
+	row.TextSize = 18
+	row.LayoutOrder = self._nextCommandOrder
+	self._nextCommandOrder = self._nextCommandOrder + 1
+	entry.Instance = row
+	table.insert(self._commands, entry)
+	self:_connect(row.Activated, function()
+		self.Cmdbar.Text = entry.Name .. " "
+		self:Focus()
+		self.Cmdbar.CursorPosition = #self.Cmdbar.Text + 1
+	end, entry._connections)
+	self:_connect(row.MouseEnter, function() self:_tooltip(entry, true) end, entry._connections)
+	self:_connect(row.MouseLeave, function() self.Tooltip.Visible = false end, entry._connections)
+	local window = self
+	function entry:Destroy()
+		if self._destroyed then return end
+		self._destroyed = true
+		disconnectAll(self._connections)
+		local index = table.find(window._commands, self)
+		if index then table.remove(window._commands, index) end
+		window.Tooltip.Visible = false
+		self.Instance:Destroy()
+	end
+	self:_filter()
+	return entry
+end
+
+function Window:Submit(text)
+	if self._destroyed then return false end
+	local words = {}
+	for word in string.gmatch(text, "%S+") do table.insert(words, word) end
+	local name = table.remove(words, 1)
+	if not name then return false end
+	name = string.lower(name)
+	for _, entry in ipairs(self._commands) do
+		local matches = string.lower(entry.Name) == name
+		for _, alias in ipairs(entry.Aliases) do matches = matches or string.lower(alias) == name end
+		if matches then
+			callback(entry.Callback, words, self)
+			return true
+		end
+	end
+	callback(self.OnSubmit, text, words, self)
+	return false
+end
+
+function Window:Focus()
+	if self._destroyed then return end
+	self:SetVisible(true)
+	self:SetMinimized(false)
+	self:ShowPage("Commands")
+	self.Cmdbar:CaptureFocus()
+end
+
+function Window:ShowPage(name)
+	assert(name == "Commands" or self.Pages[name], "Unknown page: " .. tostring(name))
+	self.Commands.Visible = name == "Commands"
+	for pageName, page in pairs(self.Pages) do page.Instance.Visible = pageName == name end
+	self.Tooltip.Visible = false
+	self._page = name
+end
+
+function Window:AddPage(name)
+	assert(name ~= "Commands" and not self.Pages[name], "Duplicate page: " .. tostring(name))
+	local list = new("ScrollingFrame", {
+		Name = name, BorderSizePixel = 0, BackgroundTransparency = 1,
+		Size = UDim2.new(1, -10, 1, -5), Position = UDim2.fromOffset(5, 5),
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 8, ScrollingDirection = Enum.ScrollingDirection.Y, Visible = false,
+	}, self.Body)
+	self:_bind(list, "ScrollBarImageColor3", "Scroll")
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5) }, list)
+	new("UIPadding", { PaddingBottom = UDim.new(0, 5) }, list)
+	local page = setmetatable({ Instance = list, Window = self, _order = 0 }, Page)
+	self.Pages[name] = page
+	return page
+end
+
+function Page:_row(text)
+	self._order = self._order + 1
+	local row = self.Window:_text("TextLabel", self.Instance, text, UDim2.new(1, -8, 0, 25))
+	row.LayoutOrder = self._order
+	return row
+end
+
+function Page:AddLabel(text)
+	local row = self:_row(text)
+	return { Instance = row, Set = function(_, value) row.Text = tostring(value) end }
+end
+
+function Page:AddButton(options)
+	local row = self:_row("")
+	local button = self.Window:_text("TextButton", row, options.Text or "Button", UDim2.fromScale(1, 1), nil, "Shade2")
+	button.TextXAlignment = Enum.TextXAlignment.Center
+	self.Window:_connect(button.Activated, function() callback(options.Callback) end)
+	return { Instance = row, Button = button }
+end
+
+function Page:AddToggle(options)
+	local window = self.Window
+	local row = self:_row(options.Text or "Toggle")
+	row.Size = UDim2.new(1, -8, 0, 20)
+	local button = window:_text("TextButton", row, "", UDim2.fromOffset(20, 20), UDim2.new(1, -20, 0, 0), "Shade3")
+	button.TextXAlignment = Enum.TextXAlignment.Center
+	local control = { Instance = row, Value = options.Default == true }
+	function control:Set(value, silent)
+		local nextValue = value == true
+		local changed = self.Value ~= nextValue
+		self.Value = nextValue
+		button.Text = nextValue and "✓" or ""
+		if changed and not silent then callback(options.Callback, nextValue) end
+	end
+	control:Set(control.Value, true)
+	window:_connect(button.Activated, function() control:Set(not control.Value) end)
+	return control
+end
+
+function Page:AddTextbox(options)
+	local row = self:_row(options.Text or "Input")
+	row.Size = UDim2.new(1, -8, 0, 45)
+	row.TextYAlignment = Enum.TextYAlignment.Top
+	local box = self.Window:_text("TextBox", row, tostring(options.Default or ""),
+		UDim2.new(1, 0, 0, 23), UDim2.fromOffset(0, 22), "Shade2")
+	box.PlaceholderText = options.Placeholder or ""
+	local control = { Instance = row, TextBox = box }
+	function control:Set(value, silent)
+		box.Text = tostring(value)
+		if not silent then callback(options.Callback, box.Text, false) end
+	end
+	function control:Get() return box.Text end
+	self.Window:_connect(box.FocusLost, function(enter)
+		callback(options.Callback, box.Text, enter)
+	end)
+	return control
+end
+
+function Window:Notify(options, text, duration)
+	if self._destroyed then return end
+	if type(options) == "string" then options = { Title = options, Text = text, Duration = duration } end
+	options = options or {}
+	local seconds = options.Duration == nil and 10 or options.Duration
+	assert(finite(seconds) and seconds >= 0, "Notification duration must be nonnegative")
+	self._notificationId = self._notificationId + 1
+	local id = self._notificationId
+	self._pinned = false
+	self._noticeTitle.Text = options.Title or "Notification"
+	self._noticeText.Text = options.Text or ""
+	self._pin.Text = "○"
+	self.Notification.Visible = true
+	if seconds > 0 then
+		task.delay(seconds, function()
+			if not self._destroyed and id == self._notificationId and not self._pinned then
+				self.Notification.Visible = false
+			end
+		end)
+	end
+	local window = self
+	return {
+		Close = function()
+			if not window._destroyed and id == window._notificationId then window.Notification.Visible = false end
+		end,
+		Pin = function(_, value)
+			if not window._destroyed and id == window._notificationId then
+				window._pinned = value ~= false
+				window._pin.Text = window._pinned and "●" or "○"
+			end
+		end,
+	}
+end
+
+function Window:_cleanup()
+	if self._destroyed then return end
+	self._destroyed = true
+	if self._movement then self._movement:Cancel() end
+	disconnectAll(self._connections)
+	for _, entry in ipairs(self._commands) do disconnectAll(entry._connections) end
+	table.clear(self._commands)
+end
+
+function Window:Destroy()
+	self:_cleanup()
+	self.ScreenGui:Destroy()
+end
+
+function Library:CreateWindow(options)
+	options = options or {}
+	local player = Players.LocalPlayer
+	assert(player, "InfiniteYieldUI must run on the client")
+	local self = setmetatable({
+		Theme = {}, Pages = {}, Prefix = options.Prefix or ";", OnSubmit = options.OnSubmit,
+		_connections = {}, _commands = {}, _colors = setmetatable({}, { __mode = "k" }),
+		_nextCommandOrder = 1, _notificationId = 0, _height = 220,
+		_keepOpen = options.KeepOpen ~= false, _leaveId = 0, _page = "Commands",
+		_openPosition = options.Position or UDim2.new(1, -260, 1, -230),
+	}, Window)
+	for key, color in pairs(Library.Theme) do self.Theme[key] = color end
+	if options.Theme then
+		for key, color in pairs(options.Theme) do
+			assert(self.Theme[key] and typeof(color) == "Color3", "Invalid theme slot: " .. tostring(key))
+			self.Theme[key] = color
+		end
+	end
+	self:SetPrefix(self.Prefix)
+	local scale = options.Scale or 1
+	assert(finite(scale) and scale >= 0.5 and scale <= 2, "Scale must be between 0.5 and 2")
+	self.ScreenGui = new("ScreenGui", {
+		Name = options.Name or "InfiniteYieldUI", ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = options.DisplayOrder or 100, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, options.Parent or player:WaitForChild("PlayerGui"))
+	self.Root = new("Frame", { Name = "ScaledHolder", BackgroundTransparency = 1, Size = UDim2.fromScale(1 / scale, 1 / scale) }, self.ScreenGui)
+	self.Scale = new("UIScale", { Scale = scale }, self.Root)
+	self.Holder = self:_frame(self.Root, "Holder", UDim2.fromOffset(250, 220), self._openPosition, "Shade2")
+	self.Holder.Active = true
+	self.Holder.ClipsDescendants = true
+	local title = self:_text("TextLabel", self.Holder, options.Title or "Infinite Yield UI",
+		UDim2.fromOffset(250, 20), nil, "Shade1")
+	title.TextSize = 18
+	title.TextXAlignment = Enum.TextXAlignment.Center
+	self.Title = title
+	local settingsButton = self:_text("TextButton", self.Holder, "⚙", UDim2.fromOffset(20, 20), UDim2.fromOffset(230, 0), "Shade1")
+	settingsButton.ZIndex = 2
+	settingsButton.TextXAlignment = Enum.TextXAlignment.Center
+	local minimizeButton = self:_text("TextButton", self.Holder, "−", UDim2.fromOffset(20, 20), nil, "Shade1")
+	minimizeButton.ZIndex = 2
+	minimizeButton.TextXAlignment = Enum.TextXAlignment.Center
+	self.Cmdbar = self:_text("TextBox", self.Holder, "", UDim2.fromOffset(240, 25), UDim2.fromOffset(5, 20))
+	self.Cmdbar.Name = "Cmdbar"
+	self.Cmdbar.TextSize = 18
+	self.Cmdbar.PlaceholderText = options.Placeholder or "Command Bar"
+	self.Body = self:_frame(self.Holder, "Dark", UDim2.fromOffset(250, 175), UDim2.fromOffset(0, 45))
+	self.Commands = new("ScrollingFrame", {
+		Name = "Commands", BackgroundTransparency = 1, BorderSizePixel = 0,
+		Position = UDim2.fromOffset(5, 0), Size = UDim2.fromOffset(245, 175),
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 8, ScrollingDirection = Enum.ScrollingDirection.Y,
+	}, self.Body)
+	self:_bind(self.Commands, "ScrollBarImageColor3", "Scroll")
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, self.Commands)
+	self.Tooltip = self:_frame(self.Root, "Tooltip", UDim2.fromOffset(200, 96))
+	self.Tooltip.Visible = false
+	self.Tooltip.Active = false
+	self.Tooltip.ZIndex = 20
+	self._tooltipTitle = self:_text("TextLabel", self.Tooltip, "", UDim2.fromOffset(200, 20), nil, "Shade2")
+	self._tooltipTitle.ZIndex = 21
+	self._tooltipDescription = self:_text("TextLabel", self.Tooltip, "", UDim2.fromOffset(180, 72), UDim2.fromOffset(10, 22))
+	self._tooltipDescription.TextWrapped = true
+	self._tooltipDescription.TextYAlignment = Enum.TextYAlignment.Top
+	self._tooltipDescription.ZIndex = 21
+	self.Notification = self:_frame(self.Root, "Notification", UDim2.fromOffset(250, 100), UDim2.new(1, -520, 1, -110))
+	self.Notification.Visible = false
+	self.Notification.ZIndex = 30
+	self._noticeTitle = self:_text("TextLabel", self.Notification, "", UDim2.fromOffset(250, 20), nil, "Shade2")
+	self._noticeTitle.TextXAlignment = Enum.TextXAlignment.Center
+	self._noticeText = self:_text("TextLabel", self.Notification, "", UDim2.fromOffset(240, 75), UDim2.fromOffset(5, 25))
+	self._noticeText.TextWrapped = true
+	self._noticeText.TextSize = 16
+	self._noticeTitle.ZIndex = 31
+	self._noticeText.ZIndex = 31
+	local close = self:_text("TextButton", self.Notification, "×", UDim2.fromOffset(20, 20), UDim2.fromOffset(230, 0))
+	close.ZIndex = 32
+	close.TextXAlignment = Enum.TextXAlignment.Center
+	self._pin = self:_text("TextButton", self.Notification, "○", UDim2.fromOffset(20, 20))
+	self._pin.ZIndex = 32
+	self._pin.TextXAlignment = Enum.TextXAlignment.Center
+	self:_connect(close.Activated, function() self.Notification.Visible = false end)
+	self:_connect(self._pin.Activated, function()
+		self._pinned = not self._pinned
+		self._pin.Text = self._pinned and "●" or "○"
+	end)
+	local settings = self:AddPage("Settings")
+	settings:AddButton({ Text = "← Commands", Callback = function() self:ShowPage("Commands") end })
+	settings:AddTextbox({ Text = "Prefix", Default = self.Prefix, Callback = function(value)
+		if value ~= "" then self:SetPrefix(value) end
+	end })
+	settings:AddToggle({ Text = "Keep Menu Open", Default = self._keepOpen, Callback = function(value)
+		self._keepOpen = value
+		if value then self:SetMinimized(false) end
+	end })
+	self:_connect(settingsButton.Activated, function()
+		self:SetMinimized(false)
+		self:ShowPage(self._page == "Settings" and "Commands" or "Settings")
+	end)
+	self:_connect(minimizeButton.Activated, function() self:SetMinimized(not self._minimized) end)
+	self:_connect(self.Cmdbar:GetPropertyChangedSignal("Text"), function() self:_filter() end)
+	self:_connect(self.Cmdbar.Focused, function() self:SetMinimized(false) end)
+	self:_connect(self.Cmdbar.FocusLost, function(enter)
+		if enter then
+			local text = self.Cmdbar.Text
+			self.Cmdbar.Text = ""
+			self:Submit(text)
+		end
+	end)
+	self:_connect(UIS.InputBegan, function(input, processed)
+		if processed or UIS:GetFocusedTextBox() then return end
+		if options.ToggleKey and input.KeyCode == options.ToggleKey then self:SetVisible(not self.Root.Visible) end
+		if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+		local key = UIS:GetStringForKeyCode(input.KeyCode)
+		if string.lower(key) == string.lower(self.Prefix)
+			or string.lower(input.KeyCode.Name) == string.lower(self.Prefix) then
+			task.defer(function() if not self._destroyed then self:Focus() end end)
+		end
+	end)
+	self:_connect(self.Holder.MouseEnter, function()
+		self._leaveId = self._leaveId + 1
+		if not self._keepOpen then self:SetMinimized(false) end
+	end)
+	self:_connect(self.Holder.MouseLeave, function()
+		self.Tooltip.Visible = false
+		self._leaveId = self._leaveId + 1
+		local id = self._leaveId
+		task.delay(1, function()
+			if not self._destroyed and id == self._leaveId and not self._keepOpen
+				and not self._dragInput and not UIS:GetFocusedTextBox() then self:SetMinimized(true) end
+		end)
+	end)
+	self:_connect(UIS.InputChanged, function(input)
+		if not self.Tooltip.Visible or input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+		local mouse = (UIS:GetMouseLocation() - self.Root.Abso
