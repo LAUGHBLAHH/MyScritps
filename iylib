@@ -497,4 +497,14 @@ function Library:CreateWindow(options)
 	end)
 	self:_connect(UIS.InputChanged, function(input)
 		if not self.Tooltip.Visible or input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-		local mouse = (UIS:GetMouseLocation() - self.Root.Abso
+		local mouse = (UIS:GetMouseLocation() - self.Root.AbsolutePosition) / self.Scale.Scale
+		local size = self.Root.AbsoluteSize / self.Scale.Scale
+		self.Tooltip.Position = UDim2.fromOffset(math.clamp(mouse.X + 12, 0, math.max(0, size.X - 200)),
+			math.clamp(mouse.Y + 12, 0, math.max(0, size.Y - 96)))
+	end)
+	self:_connect(self.ScreenGui.Destroying, function() self:_cleanup() end)
+	self:_drag(title)
+	return self
+end
+
+return Library
