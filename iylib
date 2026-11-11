@@ -192,10 +192,28 @@ end
 
 function Window:AddCommand(options)
 	assert(type(options.Name) == "string" and options.Name ~= "", "Command Name is required")
+	-- Accept Name = "hello [args1] [arg2]" as well as separate Args/Text.
+	local name, signature = options.Name:match("^%s*(%S+)%s*(.-)%s*$")
+	assert(name, "Command Name must contain a command word")
+	local arguments = options.Args
+	if arguments ~= nil then
+		assert(type(arguments) == "table", "Command Args must be an array of parameter names")
+		local placeholders = {}
+		for _, argument in ipairs(arguments) do
+			assert(type(argument) == "string" and argument ~= "", "Argument names must be nonempty strings")
+			table.insert(placeholders, "[" .. argument .. "]")
+		end
+		signature = table.concat(placeholders, " ")
+	end
+	-- Explicit Args > Name signature > display Text. No placeholders = zero args.
+	local declaration = signature
+	if arguments == nil and declaration == "" then declaration = options.Text or "" end
+	local argumentCount = 0
+	for _ in string.gmatch(declaration, "%b[]") do argumentCount = argumentCount + 1 end
 	local entry = {
-		Name = options.Name, Text = options.Text or options.Name,
+		Name = name, Text = options.Text or (name .. (signature ~= "" and " " .. signature or "")),
 		Description = options.Description or "", Aliases = options.Aliases or {},
-		Callback = options.Callback, _connections = {},
+		Callback = options.Callback, ArgumentCount = argumentCount, _connections = {},
 	}
 	local aliases = table.concat(entry.Aliases, " ")
 	entry._search = string.lower(entry.Name .. " " .. entry.Text .. " " .. aliases .. " " .. entry.Description)
@@ -238,7 +256,9 @@ function Window:Submit(text)
 		local matches = string.lower(entry.Name) == name
 		for _, alias in ipairs(entry.Aliases) do matches = matches or string.lower(alias) == name end
 		if matches then
-			callback(entry.Callback, words, self)
+			local args = {}
+			for index = 1, entry.ArgumentCount do args[index] = words[index] or "" end
+			callback(entry.Callback, args, self)
 			return true
 		end
 	end
@@ -336,6 +356,29 @@ function Page:AddTextbox(options)
 	return control
 end
 
+function Window:_animateNotice(open)
+	if self._noticeMovement then self._noticeMovement:Cancel() end
+	self._noticeAnimationId = (self._noticeAnimationId or 0) + 1
+	local animationId = self._noticeAnimationId
+	if open then self.Notification.Visible = true end
+	self._noticeMovement = TweenService:Create(self.Notification,
+		TweenInfo.new(0.5, Enum.EasingStyle.Quart, Enum.EasingDirection.InOut),
+		{ Position = UDim2.new(0, 260, 1, open and -100 or 0) })
+	self._noticeMovement:Play()
+	if not open then
+		task.delay(0.5, function()
+			if not self._destroyed and animationId == self._noticeAnimationId then
+				self.Notification.Visible = false
+			end
+		end)
+	end
+end
+
+function Window:_closeNotice(id)
+	if self._destroyed or (id and id ~= self._notificationId) then return end
+	self:_animateNotice(false)
+end
+
 function Window:Notify(options, text, duration)
 	if self._destroyed then return end
 	if type(options) == "string" then options = { Title = options, Text = text, Duration = duration } end
@@ -348,18 +391,18 @@ function Window:Notify(options, text, duration)
 	self._noticeTitle.Text = options.Title or "Notification"
 	self._noticeText.Text = options.Text or ""
 	self._pin.Text = "○"
-	self.Notification.Visible = true
+	self:_animateNotice(true)
 	if seconds > 0 then
-		task.delay(seconds, function()
+		task.delay(seconds + 0.5, function()
 			if not self._destroyed and id == self._notificationId and not self._pinned then
-				self.Notification.Visible = false
+				self:_closeNotice(id)
 			end
 		end)
 	end
 	local window = self
 	return {
 		Close = function()
-			if not window._destroyed and id == window._notificationId then window.Notification.Visible = false end
+			window:_closeNotice(id)
 		end,
 		Pin = function(_, value)
 			if not window._destroyed and id == window._notificationId then
@@ -374,6 +417,7 @@ function Window:_cleanup()
 	if self._destroyed then return end
 	self._destroyed = true
 	if self._movement then self._movement:Cancel() end
+	if self._noticeMovement then self._noticeMovement:Cancel() end
 	for _, tween in ipairs(self._introTweens) do tween:Cancel() end
 	disconnectAll(self._connections)
 	for _, entry in ipairs(self._commands) do disconnectAll(entry._connections) end
@@ -451,7 +495,7 @@ function Library:CreateWindow(options)
 	self._tooltipDescription.TextWrapped = true
 	self._tooltipDescription.TextYAlignment = Enum.TextYAlignment.Top
 	self._tooltipDescription.ZIndex = 21
-	self.Notification = self:_frame(self.Root, "Notification", UDim2.fromOffset(250, 100), UDim2.new(0, 260, 1, -100))
+	self.Notification = self:_frame(self.Root, "Notification", UDim2.fromOffset(250, 100), UDim2.new(0, 260, 1, 0))
 	self.Notification.Visible = false
 	self.Notification.ZIndex = 30
 	self._noticeTitle = self:_text("TextLabel", self.Notification, "", UDim2.fromOffset(250, 20), nil, "Shade2")
@@ -467,7 +511,7 @@ function Library:CreateWindow(options)
 	self._pin = self:_text("TextButton", self.Notification, "○", UDim2.fromOffset(20, 20))
 	self._pin.ZIndex = 32
 	self._pin.TextXAlignment = Enum.TextXAlignment.Center
-	self:_connect(close.Activated, function() self.Notification.Visible = false end)
+	self:_connect(close.Activated, function() self:_closeNotice() end)
 	self:_connect(self._pin.Activated, function()
 		self._pinned = not self._pinned
 		self._pin.Text = self._pinned and "●" or "○"
@@ -496,9 +540,11 @@ function Library:CreateWindow(options)
 		if enter then
 			local text = self.Cmdbar.Text
 			self.Cmdbar.Text = ""
+			self._leaveId = self._leaveId + 1
+			self:SetMinimized(true)
 			self:Submit(text)
 		end
-end)
+	end)
 	self:_connect(UIS.InputBegan, function(input, processed)
 		if processed or UIS:GetFocusedTextBox() then return end
 		if options.ToggleKey and input.KeyCode == options.ToggleKey then self:SetVisible(not self.Root.Visible) end
